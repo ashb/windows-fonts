@@ -7,13 +7,32 @@ repos:
     -   id: trailing-whitespace
     -   id: end-of-file-fixer
     -   id: check-added-large-files
--   repo: https://github.com/doublify/pre-commit-rust
-    rev: v1.0
-    hooks:
-    -   id: fmt
-    -   id: cargo-check
-    -   id: clippy
 -   repo: https://github.com/psf/black
     rev: 22.10.0
     hooks:
     -   id: black
+-   repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        language: rust
+        types: [rust]
+        entry: cargo fmt
+        args: ["--"]
+      - id: cargo-check
+        name: cargo check
+        description: Check the package for errors.
+        entry: cargo check
+        language: rust
+        types: [rust]
+        pass_filenames: false
+      - id: clippy
+        name: clippy
+        description: Lint rust sources
+        entry: cargo clippy
+        language: rust
+        args: ["--", "-D", "warnings"]
+        types: [rust]
+        pass_filenames: false
+    # -   id: cargo-check
+    # -   id: clippy
