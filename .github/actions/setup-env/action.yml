@@ -6,8 +6,10 @@ inputs:
     required: true
 
 outputs:
-  rust-cache-hit: ${{ steps.cache-rust.outputs.cache-hit }}
-  python-cache-hit: ${{ steps.cache-python.outputs.cache-hit }}
+  rust-cache-hit:
+    value: ${{ steps.cache-rust.outputs.cache-hit }}
+  python-cache-hit:
+    value: ${{ steps.cache-python.outputs.cache-hit }}
 
 runs:
   using: "composite"
