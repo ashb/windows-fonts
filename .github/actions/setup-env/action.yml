@@ -13,7 +13,7 @@ runs:
         toolchain: ${{ inputs.rust-toolchain }}
         override: true
         profile: minimal
-        components: ${{ matrix.rust-toolchain == "nightly" && "llvm-tools-preview" || "" }}
+        components: ${{ matrix.rust-toolchain == 'nightly' && 'llvm-tools-preview' || '' }}
 
     - id: cache-rust
       name: cache rust
@@ -21,7 +21,8 @@ runs:
       continue-on-error: true
 
     - run: cargo install rustfilt coverage-prepare
-      if: inputs.rust-toolchain == "nightly" && steps.cache-rust.outputs.cache-hit != 'true'
+      shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash'}}
+      if: inputs.rust-toolchain == 'nightly' && steps.cache-rust.outputs.cache-hit != 'true'
 
     - name: set up python
       uses: actions/setup-python@v4
