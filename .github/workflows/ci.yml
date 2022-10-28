@@ -23,7 +23,7 @@ jobs:
     - uses: ./github/actions/setup-env
       with:
         rust-toolchain: ${{ matrix.rust-toolchain }}
-        python-version: ${{ python-version }}
+        python-version: ${{ matrix.python-version }}
 
     - run: "pip install -e .[tests]"
       env:
