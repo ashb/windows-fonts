@@ -2,54 +2,28 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
-# (cargo llvm-cov show-env) -replace('"', '') | ConvertFrom-String -Delimiter '=' | foreach-object { New-Item -Path Env: -Name $_.P1 -Value  $_.P2 -Force }
 jobs:
   tests:
     strategy:
       matrix:
         rust-toolchain:
-          - nightly
+          - stable
         python-version:
           - '3.7'
           - '3.11'
         include:
-          - rust-toolchain: stable
-            python-version: '3.10'
+          - rust-toolchain: nightly
+            python-version: '3.11'
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v3
-
-    - uses: actions-rs/toolchain@v1
+    - uses: ./github/actions/setup-env
       with:
-        toolchain: ${{ matrix.rust-toolchain }}
-        override: true
-        profile: minimal
-        components: "llvm-tools-preview"
-
-    - id: cache-rust
-      name: cache rust
-      uses: Swatinem/rust-cache@v2
-      continue-on-error: true
-
-    - run: cargo install rustfilt coverage-prepare
-      if: steps.cache-rust.outputs.cache-hit != 'true'
-
-    - name: set up python
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
-
-    - id: cache-py
-      name: cache python
-      uses: actions/cache@v2
-      with:
-        path: ${{ env.pythonLocation }}
-        key: >
-          py
-          ${{ runner.os }}
-          ${{ env.pythonLocation }}
-          ${{ hashFiles('pyproject.toml') }}
+        rust-toolchain: ${{ matrix.rust-toolchain }}
+        python-version: ${{ python-version }}
 
     - run: "pip install -e .[tests]"
       env:
@@ -63,8 +37,8 @@ jobs:
     - name: python tests
       run: python -m pytest
 
-
     - run: coverage-prepare lcov python/windows_fonts/*.pyd
+      if: matrix.rust-toolchain == 'nightly'
 
     - uses: codecov/codecov-action@v3
       if: matrix.rust-toolchain == 'nightly'

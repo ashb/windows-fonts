@@ -1,0 +1,40 @@
+name: Setup project environment
+inputs:
+  rust-toolchain:
+    required: true
+  python-version:
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions-rs/toolchain@v1
+      with:
+        toolchain: ${{ inputs.rust-toolchain }}
+        override: true
+        profile: minimal
+        components: ${{ matrix.rust-toolchain == "nightly" && "llvm-tools-preview" || "" }}
+
+    - id: cache-rust
+      name: cache rust
+      uses: Swatinem/rust-cache@v2
+      continue-on-error: true
+
+    - run: cargo install rustfilt coverage-prepare
+      if: inputs.rust-toolchain == "nightly" && steps.cache-rust.outputs.cache-hit != 'true'
+
+    - name: set up python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - id: cache-py
+      name: cache python
+      uses: actions/cache@v2
+      with:
+        path: ${{ env.pythonLocation }}
+        key: >
+          py
+          ${{ runner.os }}
+          ${{ env.pythonLocation }}
+          ${{ hashFiles('pyproject.toml') }}
