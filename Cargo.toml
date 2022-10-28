@@ -1,0 +1,25 @@
+[package]
+name = "windows-fonts"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "_windows_fonts"
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.maturin]
+name = 'windows_fonts._windows_fonts'
+python-source = "python"
+
+[dependencies]
+pyo3 = { version = "0.17.2", features = ["extension-module"] }
+
+[dependencies.windows]
+version = "0.42.0"
+features = [
+    "Foundation_Numerics",
+    "Win32_System_Com",
+    "Win32_Foundation",
+    "Win32_Graphics_DirectWrite",
+]

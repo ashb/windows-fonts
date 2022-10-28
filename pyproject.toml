@@ -1,0 +1,38 @@
+[build-system]
+requires = ["maturin>=0.12,<0.13"]
+build-backend = "maturin"
+
+[project]
+name = "windows-fonts"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Topic :: Text Processing :: Fonts",
+]
+authors = [
+    { name="Ash Berlin-Taylor", email="ash_github@firemirror.com>" },
+]
+
+[project.optional-dependencies]
+tests = [
+    "pytest >= 7",
+    "black",
+    "coverage",
+]
+
+[tool.black]
+color = true
+line-length = 120
+target-version = ['py37', 'py38', 'py39', 'py310']
+skip-string-normalization = true
+skip-magic-trailing-comma = true
+
+[tool.isort]
+line_length = 120
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+combine_as_imports = true
+color_output = true

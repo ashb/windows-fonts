@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+# (cargo llvm-cov show-env) -replace('"', '') | ConvertFrom-String -Delimiter '=' | foreach-object { New-Item -Path Env: -Name $_.P1 -Value  $_.P2 -Force }
+jobs:
+  tests:
+    strategy:
+      matrix:
+        rust-toolchain:
+          - nightly
+        python-version:
+          - '3.7'
+          - '3.11'
+        include:
+          - rust-toolchain: stable
+            python-version: '3.10'
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - uses: actions-rs/toolchain@v1
+      with:
+        toolchain: ${{ matrix.rust-toolchain }}
+        override: true
+        profile: minimal
+        components: "llvm-tools-preview"
+
+    - id: cache-rust
+      name: cache rust
+      uses: Swatinem/rust-cache@v2
+      continue-on-error: true
+
+    - run: cargo install rustfilt coverage-prepare
+      if: steps.cache-rust.outputs.cache-hit != 'true'
+
+    - name: set up python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - id: cache-py
+      name: cache python
+      uses: actions/cache@v2
+      with:
+        path: ${{ env.pythonLocation }}
+        key: >
+          py
+          ${{ runner.os }}
+          ${{ env.pythonLocation }}
+          ${{ hashFiles('pyproject.toml') }}
+
+    - run: "pip install -e .[tests]"
+      env:
+        RUST_BACKTRACE: 1
+        RUSTFLAGS: '-C instrument-coverage'
+
+    - name: rust tests
+      run: cargo test
+
+    # We don't run python coverage as we don't have any python code to speak of right now!
+    - name: python tests
+      run: python -m pytest
+
+
+    - run: coverage-prepare lcov python/windows_fonts/*.pyd
+
+    - uses: codecov/codecov-action@v3
+      if: matrix.rust-toolchain == 'nightly'
+      with:
+        env_vars: PYTHON
