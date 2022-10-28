@@ -20,7 +20,7 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v3
-    - uses: .github/actions/setup-env
+    - uses: ./.github/actions/setup-env
       with:
         rust-toolchain: ${{ matrix.rust-toolchain }}
         python-version: ${{ matrix.python-version }}
