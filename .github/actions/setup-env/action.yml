@@ -8,20 +8,32 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: ${{ inputs.rust-toolchain }}
-        override: true
-        profile: minimal
-        components: ${{ matrix.rust-toolchain == 'nightly' && 'llvm-tools-preview' || '' }}
+    - name: "Install Rust"
+      run: |
+        rustup toolchain install ${{ inputs.rust-toolchain }} --profile minimal --no-self-update
+        rustup default ${{ inputs.rust.toolchina }}
+      shell: bash
+    - name: "Install rust coverage components"
+      run: rustup component add llvm-tools-preview
+      shell: bash
+      if: matrix.rust-toolchain == 'nightly'
 
     - id: cache-rust
       name: cache rust
       uses: Swatinem/rust-cache@v2
       continue-on-error: true
 
+    - name: "Set environment variables used by rust toolchain"
+      run: |
+        echo CARGO_TERM_COLOR=always >> $GITHUB_ENV
+        echo CARGO_INCREMENTAL=0 >> $GITHUB_ENV
+        echo RUST_BACKTRACE=1 >> $GITHUB_ENV
+
+        rustc --version --verbose
+      shell: bash
+
     - run: cargo install rustfilt coverage-prepare
-      shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash'}}
+      shell: bash
       if: inputs.rust-toolchain == 'nightly' && steps.cache-rust.outputs.cache-hit != 'true'
 
     - name: set up python
