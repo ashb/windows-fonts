@@ -1,3 +1,6 @@
+# A lot of this workflow was cribbed from https://github.com/pydantic/pydantic-core/blob/da0a6c72a4/.github/workflows/ci.yml
+# Thanks Samuel!
+
 name: CI
 
 on:
@@ -6,17 +9,25 @@ on:
       - main
   pull_request:
 jobs:
-  tests:
+  test:
     strategy:
       matrix:
         rust-toolchain:
           - stable
         python-version:
           - '3.7'
+          - '3.8'
+          - '3.9'
+          - '3.10'
           - '3.11'
         include:
+          # Have one nightly build for coverage figures
           - rust-toolchain: nightly
             python-version: '3.11'
+          # And for one build, upload the artifacts for _every_ PR/build
+          - python-verion: '3.11'
+            rust-toolchain: 'stable'
+            wheels-to-artifacts: true
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v3
@@ -27,12 +38,17 @@ jobs:
         rust-toolchain: ${{ matrix.rust-toolchain }}
         python-version: ${{ matrix.python-version }}
 
-    - run: "pip install -e .[tests]"
+    - name: build module
+      uses: messense/maturin-action@v1
+      with:
+        command: build
+        rust-toolchain: ${{ matrix.rust-toolchain }}
+
+    - run: "pip install -e '.[tests]' -v"
       env:
         RUSTFLAGS: '-C instrument-coverage'
 
-    - name: rust tests
-      run: cargo test
+    - run: cargo test
 
     # We don't run python coverage as we don't have any python code to speak of right now!
     - name: python tests
@@ -46,6 +62,20 @@ jobs:
       with:
         env_vars: PYTHON
 
+    - name: build wheel
+      uses: messense/maturin-action@v1
+      with:
+        args: --out dist
+        rust-toolchain: ${{ matrix.rust-toolchain }}
+      # Don't build wheel here if we'd do a full build anyway
+      if: matrix.wheels-to-artifacts && (!startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/main' && !contains(github.event.pull_request.labels.*.name, 'Full Build'))
+
+    - uses: actions/upload-artifact@v3
+      with:
+        name: pypi_files-${{ matrix.python-version }}
+        path: dist
+      if: matrix.wheels-to-artifacts && (!startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/main' && !contains(github.event.pull_request.labels.*.name, 'Full Build'))
+
   lint:
     runs-on: windows-latest
     steps:
@@ -56,15 +86,129 @@ jobs:
       with:
         rust-toolchain: stable
         python-version: 3.11
+        python-extras: pre-commit
 
-    - run: "pip install -e .[tests] pre-commit"
-
-    - run: python -m pip install pre-commit
-      if: steps.setup.outputs.python-cache-hit != 'true'
-    - run: python -m pip freeze --local
     - name: Cache pre-commits
       uses: actions/cache@v3
       with:
         path: ~/.cache/pre-commit
         key: pre-commit-3|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
     - run: pre-commit run --show-diff-on-failure --color=always --all-files
+
+  # https://github.com/marketplace/actions/alls-green#why used for branch protection checks
+  check:
+    if: always()
+    needs: [test, lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide whether the needed jobs succeeded or failed
+        uses: re-actors/alls-green@release/v1
+        with:
+          jobs: ${{ toJSON(needs) }}
+
+  build:
+    name: build on windows (x86_64)
+    # only run on push to main and on release, or with tag
+    if: "success() && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || contains(github.event.pull_request.labels.*.name, 'Full Build'))"
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - id: setup-python
+        name: set up python
+        uses: actions/setup-python@v4
+        with:
+          # 3.11 isn't in the hosted tool cache, but all the others are, so we only need to add that one
+          python-version: 3.11
+
+      - run: pip install -U twine 'black>=22.3.0,<23'
+
+      - name: build sdist
+        uses: messense/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+          rust-toolchain: stable
+
+      - name: build wheels
+        uses: messense/maturin-action@v1
+        with:
+          args: --release --out dist --interpreter 3.7 3.8 3.9 3.10 3.11
+          rust-toolchain: stable
+
+      - run: ls -altrh dist/
+        shell: bash
+
+      - run: twine check dist/*
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: pypi_files
+          path: dist
+
+  inspect-pypi-assets:
+    needs: [build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: get dist artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: pypi_files
+          path: dist
+
+      - name: list dist files
+        run: |
+         ls -lh dist/
+         echo "`ls dist | wc -l` files"
+      - name: extract and list sdist file
+        run: |
+         mkdir sdist-files
+         tar -xvf dist/*.tar.gz -C sdist-files
+         tree -a sdist-files
+      - name: extract and list wheel file
+        run: |
+         ls dist/*cp310*win_amd64.whl | head -n 1
+         python -m zipfile --list `ls dist/*cp310*win_amd64.whl | head -n 1`
+
+  release:
+    needs: [build, check]
+    if: "success() && startsWith(github.ref, 'refs/tags/')"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: set up python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: check package version
+        run: python .github/check_version.py
+
+      - run: pip install -U twine
+
+      - name: get dist artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: pypi_files
+          path: dist
+
+      - run: twine check dist/*
+
+      - name: upload to pypi
+        run: twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.pypi_token }}
+
+      - name: upload to github release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}
