@@ -5,9 +5,18 @@ inputs:
   python-version:
     required: true
 
+outputs:
+  rust-cache-hit: ${{ steps.cache-rust.outputs.cache-hit }}
+  python-cache-hit: ${{ steps.cache-python.outputs.cache-hit }}
+
 runs:
   using: "composite"
   steps:
+    - id: cache-rust
+      name: cache rust
+      uses: Swatinem/rust-cache@v2
+      continue-on-error: true
+
     - name: "Install Rust"
       run: |
         rustup toolchain install ${{ inputs.rust-toolchain }} --profile minimal --no-self-update
@@ -17,11 +26,6 @@ runs:
       run: rustup component add llvm-tools-preview
       shell: bash
       if: matrix.rust-toolchain == 'nightly'
-
-    - id: cache-rust
-      name: cache rust
-      uses: Swatinem/rust-cache@v2
-      continue-on-error: true
 
     - name: "Set environment variables used by rust toolchain"
       run: |
@@ -36,18 +40,23 @@ runs:
       shell: bash
       if: inputs.rust-toolchain == 'nightly' && steps.cache-rust.outputs.cache-hit != 'true'
 
-    - name: set up python
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ inputs.python-version }}
-
-    - id: cache-py
+    - id: cache-python
       name: cache python
       uses: actions/cache@v3
+      continue-on-error: true
       with:
         path: ${{ env.pythonLocation }}
         key: >
           py
-          ${{ runner.os }}
-          ${{ env.pythonLocation }}
+          ${{ runner.os }}-
+          ${{ env.pythonLocation }}-
           ${{ hashFiles('pyproject.toml') }}
+        restore-keys: |
+          py
+          ${{ runner.os }}-
+          ${{ env.pythonLocation }}-
+
+    - name: set up python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ inputs.python-version }}
