@@ -4,12 +4,16 @@ inputs:
     required: true
   python-version:
     required: true
+  python-extras:
+    required: false
+    default: ""
+    description: Python extras to inclue in this environment. requirements.txt (multiline) format
 
 outputs:
   rust-cache-hit:
     value: ${{ steps.cache-rust.outputs.cache-hit }}
   python-cache-hit:
-    value: ${{ steps.cache-python.outputs.cache-hit }}
+    value: ${{ steps.setup-python.outputs.cache-hit }}
 
 runs:
   using: "composite"
@@ -42,23 +46,25 @@ runs:
       shell: bash
       if: inputs.rust-toolchain == 'nightly' && steps.cache-rust.outputs.cache-hit != 'true'
 
-    - id: cache-python
-      name: cache python
-      uses: actions/cache@v3
-      continue-on-error: true
-      with:
-        path: ${{ env.pythonLocation }}
-        key: >
-          py
-          ${{ runner.os }}-
-          ${{ env.pythonLocation }}-
-          ${{ hashFiles('pyproject.toml') }}
-        restore-keys: |
-          py
-          ${{ runner.os }}-
-          ${{ env.pythonLocation }}-
+    - run: echo "$extras" > .python-extras
+      shell: bash
+      env:
+        extras: ${{ inputs.python-extras }}
 
-    - name: set up python
+    - id: setup-python
+      name: set up python
       uses: actions/setup-python@v4
       with:
         python-version: ${{ inputs.python-version }}
+        cache: 'pip'
+        cache-dependency-path: |
+          .python-extras
+          pyproject.toml
+
+    - name: Install extra python modules
+      run: |
+        [ -n .python-extra ] && python -m pip install -r .python-extras
+      shell: bash
+
+    - run: python -m pip freeze --local
+      shell: bash
