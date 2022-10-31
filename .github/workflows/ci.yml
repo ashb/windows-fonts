@@ -7,6 +7,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - '**'
   pull_request:
 jobs:
   test:
@@ -94,6 +96,9 @@ jobs:
         path: ~/.cache/pre-commit
         key: pre-commit-3|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
     - run: pre-commit run --show-diff-on-failure --color=always --all-files
+      env:
+        # We dont need to run actionlint on CI, because if GH runs it then we don't care.
+        SKIP: actionlint
 
   # https://github.com/marketplace/actions/alls-green#why used for branch protection checks
   check:
@@ -187,7 +192,7 @@ jobs:
           python-version: '3.10'
 
       - name: check package version
-        run: python .github/check_version.py
+        run: python .github/check-version.py
 
       - run: pip install -U twine
 

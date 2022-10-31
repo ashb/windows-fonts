@@ -12,7 +12,7 @@ classifiers = [
     "Topic :: Text Processing :: Fonts",
 ]
 authors = [
-    { name="Ash Berlin-Taylor", email="ash_github@firemirror.com>" },
+    { name="Ash Berlin-Taylor", email="ash_github@firemirror.com" },
 ]
 
 [project.optional-dependencies]
