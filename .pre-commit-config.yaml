@@ -36,3 +36,7 @@ repos:
         pass_filenames: false
     # -   id: cargo-check
     # -   id: clippy
+-   repo: https://github.com/rhysd/actionlint
+    rev: v1.6.21
+    hooks:
+      - id: actionlint
