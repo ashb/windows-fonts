@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::ffi::{c_int, c_void};
 use std::slice;
 
+use anyhow::Result;
+
 use pyo3::class::basic::CompareOp;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyRuntimeError};
 use pyo3::prelude::*;
@@ -10,7 +12,7 @@ use windows::core::HSTRING;
 use windows::Win32::Foundation::BOOL;
 use windows::Win32::Graphics::DirectWrite::{IDWriteFont, IDWriteLocalizedStrings};
 use windows::{
-    core::{Interface, Result, PCWSTR},
+    core::{Interface, PCWSTR},
     w,
     Win32::Graphics::DirectWrite::{
         DWriteCreateFactory, IDWriteFactory1, IDWriteFontCollection1, IDWriteFontFamily,
@@ -31,7 +33,7 @@ fn _get_local_loader() -> Result<IDWriteLocalFontFileLoader> {
         let file = factory.CreateFontFileReference(w!(r"C:\Windows\Fonts\Arial.ttf"), None)?;
 
         let loader = file.GetLoader()?;
-        loader.cast()
+        Ok(loader.cast()?)
     }
 }
 
@@ -51,7 +53,7 @@ fn _get_user_locale() -> Result<HSTRING> {
         );
 
         if len <= 0 {
-            Err(windows::core::Error::from_win32())
+            Err(windows::core::Error::from_win32().into())
         } else if len == 1 {
             // zero length string! (just the null byte came back) Fallback:
             Ok(w!("en-US").to_owned())
@@ -65,7 +67,7 @@ fn _get_user_locale() -> Result<HSTRING> {
 mod enums;
 mod errors;
 
-use errors::PyWindowsErr;
+use errors::WindowsFontError;
 
 #[derive(FromPyObject)]
 enum IntOrStr<'a> {
@@ -97,8 +99,8 @@ impl FontCollection {
 #[pymethods]
 impl FontCollection {
     #[new]
-    fn __new__() -> PyResult<Self> {
-        let collection = Self::get_system_font_collection().map_err(PyWindowsErr::from)?;
+    fn __new__() -> Result<Self> {
+        let collection = Self::get_system_font_collection()?;
         Ok(FontCollection { collection })
     }
 
@@ -114,7 +116,7 @@ impl FontCollection {
                 let s: Vec<u16> = str.to_string().encode_utf16().collect();
                 self.collection
                     .FindFamilyName(&HSTRING::from_wide(s.as_slice()), &mut i_out, &mut exists)
-                    .map_err(PyWindowsErr::from)?;
+                    .map_err(WindowsFontError::from)?;
                 if !exists.as_bool() {
                     return Err(PyKeyError::new_err(format!(
                         "unknown font family {:?}",
@@ -133,7 +135,7 @@ impl FontCollection {
         let ifamily = unsafe {
             self.collection
                 .GetFontFamily(index)
-                .map_err(PyWindowsErr::from)?
+                .map_err(WindowsFontError::from)?
         };
 
         Ok(FontFamily(ifamily))
@@ -189,12 +191,11 @@ impl FontFamily {
 #[pymethods]
 impl FontFamily {
     #[getter]
-    pub fn name(&self) -> PyResult<String> {
-        let res = unsafe { self._get_best_name() };
-        Ok(res.map_err(PyWindowsErr::from)?)
+    pub fn name(&self) -> Result<String> {
+        unsafe { self._get_best_name() }
     }
 
-    pub fn __repr__(&self) -> PyResult<String> {
+    pub fn __repr__(&self) -> Result<String> {
         Ok(format!("<FontFamily name={:?}>", self.name()?,))
     }
 
@@ -295,7 +296,7 @@ impl FontVariant {
     }
 
     pub fn files(&self) -> PyResult<Vec<String>> {
-        let res = unsafe { self._get_files() }.map_err(PyWindowsErr::from)?;
+        let res = unsafe { self._get_files() }?;
         Ok(res)
     }
 
