@@ -10,7 +10,7 @@ use windows::Win32::Graphics::DirectWrite::{
 #[pyclass]
 #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
 #[repr(i32)]
-#[derive(PartialEq, Eq, PartialOrd)]
+#[derive(PartialEq, Eq, PartialOrd, Clone)]
 pub enum Weight {
     ULTRA_LIGHT = DWRITE_FONT_WEIGHT_ULTRA_LIGHT.0,
     LIGHT = DWRITE_FONT_WEIGHT_LIGHT.0,
@@ -24,10 +24,16 @@ pub enum Weight {
     EXTRA_BLACK = DWRITE_FONT_WEIGHT_EXTRA_BLACK.0,
 }
 
+impl From<Weight> for f32 {
+    fn from(w: Weight) -> Self {
+        w as i32 as f32
+    }
+}
+
 #[pyclass]
 #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
 #[repr(i32)]
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone)]
 pub enum Style {
     NORMAL = DWRITE_FONT_STYLE_NORMAL.0,
     ITALIIC = DWRITE_FONT_STYLE_ITALIC.0,

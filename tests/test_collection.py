@@ -1,6 +1,6 @@
 import pytest
 
-from windows_fonts import FontCollection, py_sum
+from windows_fonts import FontCollection
 
 
 @pytest.fixture(scope="module")
