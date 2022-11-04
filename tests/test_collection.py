@@ -20,3 +20,8 @@ def test_get_index_key_same(collection: FontCollection):
     assert by_key is not None
 
     assert by_idx == by_key
+
+
+def test_no_such_font(collection: FontCollection):
+    with pytest.raises(KeyError, match=r"unknown font family 'foobarbaznotfound'"):
+        collection["foobarbaznotfound"]

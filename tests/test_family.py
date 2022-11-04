@@ -27,3 +27,7 @@ def test_get_best_match(weight, italic, expected_props, family: FontFamily):
 
     for (name, val) in expected_props.items():
         assert getattr(var, name) == val
+
+
+def test_repr(family: FontFamily):
+    assert repr(family) == '<FontFamily name="Arial">'
