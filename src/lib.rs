@@ -2,19 +2,22 @@ use std::cell::RefCell;
 use std::ffi::{c_int, c_void};
 use std::slice;
 
+use anyhow::{bail, Result};
+
 use pyo3::class::basic::CompareOp;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyRuntimeError};
 use pyo3::prelude::*;
-use pyo3::types::PyString;
+use pyo3::types::{PyList, PyString};
 use windows::core::HSTRING;
 use windows::Win32::Foundation::BOOL;
-use windows::Win32::Graphics::DirectWrite::{IDWriteFont, IDWriteLocalizedStrings};
 use windows::{
-    core::{Interface, Result, PCWSTR},
+    core::{Interface, PCWSTR},
     w,
     Win32::Graphics::DirectWrite::{
-        DWriteCreateFactory, IDWriteFactory1, IDWriteFontCollection1, IDWriteFontFamily,
-        IDWriteFontFile, IDWriteLocalFontFileLoader, DWRITE_FACTORY_TYPE_SHARED,
+        DWriteCreateFactory, IDWriteFactory1, IDWriteFont, IDWriteFontCollection1,
+        IDWriteFontFamily, IDWriteFontFile, IDWriteLocalFontFileLoader, IDWriteLocalizedStrings,
+        DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE,
+        DWRITE_FONT_WEIGHT,
     },
 };
 
@@ -31,7 +34,7 @@ fn _get_local_loader() -> Result<IDWriteLocalFontFileLoader> {
         let file = factory.CreateFontFileReference(w!(r"C:\Windows\Fonts\Arial.ttf"), None)?;
 
         let loader = file.GetLoader()?;
-        loader.cast()
+        Ok(loader.cast()?)
     }
 }
 
@@ -51,7 +54,7 @@ fn _get_user_locale() -> Result<HSTRING> {
         );
 
         if len <= 0 {
-            Err(windows::core::Error::from_win32())
+            Err(windows::core::Error::from_win32().into())
         } else if len == 1 {
             // zero length string! (just the null byte came back) Fallback:
             Ok(w!("en-US").to_owned())
@@ -65,7 +68,7 @@ fn _get_user_locale() -> Result<HSTRING> {
 mod enums;
 mod errors;
 
-use errors::PyWindowsErr;
+use errors::WindowsFontError;
 
 #[derive(FromPyObject)]
 enum IntOrStr<'a> {
@@ -97,8 +100,8 @@ impl FontCollection {
 #[pymethods]
 impl FontCollection {
     #[new]
-    fn __new__() -> PyResult<Self> {
-        let collection = Self::get_system_font_collection().map_err(PyWindowsErr::from)?;
+    fn __new__() -> Result<Self> {
+        let collection = Self::get_system_font_collection()?;
         Ok(FontCollection { collection })
     }
 
@@ -114,7 +117,7 @@ impl FontCollection {
                 let s: Vec<u16> = str.to_string().encode_utf16().collect();
                 self.collection
                     .FindFamilyName(&HSTRING::from_wide(s.as_slice()), &mut i_out, &mut exists)
-                    .map_err(PyWindowsErr::from)?;
+                    .map_err(WindowsFontError::from)?;
                 if !exists.as_bool() {
                     return Err(PyKeyError::new_err(format!(
                         "unknown font family {:?}",
@@ -133,7 +136,7 @@ impl FontCollection {
         let ifamily = unsafe {
             self.collection
                 .GetFontFamily(index)
-                .map_err(PyWindowsErr::from)?
+                .map_err(WindowsFontError::from)?
         };
 
         Ok(FontFamily(ifamily))
@@ -174,6 +177,21 @@ impl BestLocaleName for IDWriteLocalizedStrings {
     }
 }
 
+#[derive(FromPyObject)]
+enum FloatOrWeight {
+    Float(f32),
+    Enum(enums::Weight),
+}
+
+impl From<FloatOrWeight> for f32 {
+    fn from(e: FloatOrWeight) -> Self {
+        match e {
+            FloatOrWeight::Float(f) => f,
+            FloatOrWeight::Enum(e) => e.into(),
+        }
+    }
+}
+
 #[pyclass(sequence, module = "windows_fonts", unsendable)]
 #[derive(Clone, Debug)]
 struct FontFamily(IDWriteFontFamily);
@@ -184,17 +202,50 @@ impl FontFamily {
         let names = self.0.GetFamilyNames()?;
         names.get_best_name()
     }
+
+    // Windows 7 compatible!
+    unsafe fn _get_dwrite0_matching_variants(
+        rc: Py<Self>,
+        weight: Option<f32>,
+        style: Option<enums::Style>,
+        py: Python<'_>,
+    ) -> Box<dyn Iterator<Item = anyhow::Result<FontVariant>> + '_> {
+        let copy = rc.clone();
+        let self_ = copy.borrow(py);
+        let list = match self_.0.GetMatchingFonts(
+            DWRITE_FONT_WEIGHT(weight.unwrap_or(400.0) as i32),
+            DWRITE_FONT_STRETCH_NORMAL,
+            DWRITE_FONT_STYLE(style.unwrap_or(enums::Style::NORMAL) as i32),
+        ) {
+            Ok(l) => l,
+            Err(e) => {
+                let y = std::iter::once(e);
+                return Box::new(y.map(move |e| Err(e.into())))
+                    as Box<dyn Iterator<Item = anyhow::Result<FontVariant>>>;
+            }
+        };
+
+        let num = list.GetFontCount();
+        let it = (0..num).map(move |n| -> Result<FontVariant> {
+            let font = list.GetFont(n).map_err(WindowsFontError::from)?;
+
+            Ok(FontVariant {
+                font,
+                family: rc.clone(),
+            })
+        });
+        Box::new(it)
+    }
 }
 
 #[pymethods]
 impl FontFamily {
     #[getter]
-    pub fn name(&self) -> PyResult<String> {
-        let res = unsafe { self._get_best_name() };
-        Ok(res.map_err(PyWindowsErr::from)?)
+    pub fn name(&self) -> Result<String> {
+        unsafe { self._get_best_name() }
     }
 
-    pub fn __repr__(&self) -> PyResult<String> {
+    pub fn __repr__(&self) -> Result<String> {
         Ok(format!("<FontFamily name={:?}>", self.name()?,))
     }
 
@@ -227,6 +278,49 @@ impl FontFamily {
             CompareOp::Ne => self.ne(other).into_py(py),
             _ => py.NotImplemented(),
         }
+    }
+
+    /// Retrieves the best matching variant for the various conditions
+    #[pyo3(text_signature = "($self, *, weight=None, style=None)")]
+    fn get_best_variant(
+        rc: Py<Self>,
+        weight: Option<FloatOrWeight>,
+        style: Option<enums::Style>,
+        py: Python<'_>,
+    ) -> Result<FontVariant> {
+        if let Some(item) = unsafe {
+            FontFamily::_get_dwrite0_matching_variants(rc, weight.map(Into::into), style, py)
+        }
+        .next()
+        {
+            return item;
+        }
+        bail!("No variants found")
+    }
+
+    /// Retrieves a list of fonts in the font family, ranked in order of how well they match the specified axis values.
+    #[pyo3(text_signature = "($self, *, weight=None, style=None)")]
+    fn get_matching_variants(
+        rc: Py<Self>,
+        weight: Option<FloatOrWeight>,
+        style: Option<enums::Style>,
+        py: Python<'_>,
+    ) -> Result<&'_ PyList> {
+        let mut variants;
+        let iter = unsafe {
+            FontFamily::_get_dwrite0_matching_variants(rc, weight.map(Into::into), style, py)
+        };
+
+        if let (_, Some(hint)) = iter.size_hint() {
+            variants = Vec::with_capacity(hint);
+        } else {
+            variants = Vec::new();
+        }
+
+        for item in iter {
+            variants.push(item?.into_py(py))
+        }
+        Ok(PyList::new(py, variants))
     }
 }
 
@@ -295,7 +389,7 @@ impl FontVariant {
     }
 
     pub fn files(&self) -> PyResult<Vec<String>> {
-        let res = unsafe { self._get_files() }.map_err(PyWindowsErr::from)?;
+        let res = unsafe { self._get_files() }?;
         Ok(res)
     }
 
@@ -372,6 +466,9 @@ impl FontVariant {
 #[pymodule]
 fn _windows_fonts(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<FontCollection>()?;
+    // Even though these aren't constructable from python code, for ease of use in type checking we export them anyway
+    m.add_class::<FontFamily>()?;
+    m.add_class::<FontVariant>()?;
     m.add_class::<enums::Weight>()?;
     m.add_class::<enums::Style>()?;
     Ok(())

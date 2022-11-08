@@ -13,7 +13,9 @@ name = 'windows_fonts._windows_fonts'
 python-source = "python"
 
 [dependencies]
-pyo3 = { version = "0.17.2", features = ["extension-module"] }
+pyo3 = { version = "0.17.2", features = ["extension-module", "anyhow"] }
+anyhow = "1.0"
+thiserror = "1.0"
 
 [dependencies.windows]
 version = "0.42.0"

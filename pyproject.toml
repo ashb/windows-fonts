@@ -36,3 +36,6 @@ include_trailing_comma = true
 force_grid_wrap = 0
 combine_as_imports = true
 color_output = true
+
+[tool.pytest.ini_options]
+addopts = "--tb=short"
