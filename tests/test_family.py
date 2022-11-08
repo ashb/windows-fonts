@@ -29,6 +29,12 @@ def test_get_best_match(weight, style, expected_props, family: FontFamily):
         assert getattr(var, name) == val
 
 
+def test_get_matching_variants(family: FontFamily):
+    variants = family.get_matching_variants()
+    assert isinstance(variants, list)
+    assert len(variants) == 9
+
+
 def test_repr(family: FontFamily):
     assert repr(family) == '<FontFamily name="Arial">'
 
