@@ -32,7 +32,7 @@ def test_get_best_match(weight, style, expected_props, family: FontFamily):
 def test_get_matching_variants(family: FontFamily):
     variants = family.get_matching_variants()
     assert isinstance(variants, list)
-    assert len(variants) == 9
+    assert len(variants) > 2
 
 
 def test_repr(family: FontFamily):
