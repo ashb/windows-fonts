@@ -15,10 +15,9 @@ use windows::{
     w,
     Win32::Graphics::DirectWrite::{
         DWriteCreateFactory, IDWriteFactory1, IDWriteFont, IDWriteFontCollection1,
-        IDWriteFontFamily, IDWriteFontFamily2, IDWriteFontFile, IDWriteLocalFontFileLoader,
-        IDWriteLocalizedStrings, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_AXIS_TAG_ITALIC,
-        DWRITE_FONT_AXIS_TAG_OPTICAL_SIZE, DWRITE_FONT_AXIS_TAG_SLANT, DWRITE_FONT_AXIS_TAG_WEIGHT,
-        DWRITE_FONT_AXIS_TAG_WIDTH, DWRITE_FONT_AXIS_VALUE,
+        IDWriteFontFamily, IDWriteFontFile, IDWriteLocalFontFileLoader, IDWriteLocalizedStrings,
+        DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE,
+        DWRITE_FONT_WEIGHT,
     },
 };
 
@@ -179,16 +178,16 @@ impl BestLocaleName for IDWriteLocalizedStrings {
 }
 
 #[derive(FromPyObject)]
-enum FloatOrEnum {
+enum FloatOrWeight {
     Float(f32),
     Enum(enums::Weight),
 }
 
-impl From<FloatOrEnum> for f32 {
-    fn from(e: FloatOrEnum) -> Self {
+impl From<FloatOrWeight> for f32 {
+    fn from(e: FloatOrWeight) -> Self {
         match e {
-            FloatOrEnum::Float(f) => f,
-            FloatOrEnum::Enum(e) => e.into(),
+            FloatOrWeight::Float(f) => f,
+            FloatOrWeight::Enum(e) => e.into(),
         }
     }
 }
@@ -204,70 +203,20 @@ impl FontFamily {
         names.get_best_name()
     }
 
-    unsafe fn _get_matching_variants(
+    // Windows 7 compatible!
+    unsafe fn _get_dwrite0_matching_variants(
         rc: Py<Self>,
         weight: Option<f32>,
-        width: Option<f32>,
-        slant: Option<f32>,
-        optical_size: Option<f32>,
-        italic: Option<bool>,
+        style: Option<enums::Style>,
         py: Python<'_>,
     ) -> Box<dyn Iterator<Item = anyhow::Result<FontVariant>> + '_> {
         let copy = rc.clone();
         let self_ = copy.borrow(py);
-        let family = match self_.0.cast::<IDWriteFontFamily2>() {
-            Err(e) => {
-                eprintln!("e = {:#?}", e);
-                let r = WindowsFontError::Windows10Needed(
-                    "Use of this function requires Windows 10 Build 20348 or above".to_owned(),
-                );
-                let y = std::iter::once(r);
-                return Box::new(y.map(move |e| Err(e.into())))
-                    as Box<dyn Iterator<Item = anyhow::Result<FontVariant>>>;
-            }
-            Ok(c) => c,
-        };
-        let mut conditions: Vec<DWRITE_FONT_AXIS_VALUE> = Vec::new();
-
-        if let Some(v) = weight {
-            conditions.push(DWRITE_FONT_AXIS_VALUE {
-                axisTag: DWRITE_FONT_AXIS_TAG_WEIGHT,
-                value: v,
-            });
-        }
-
-        if let Some(v) = width {
-            conditions.push(DWRITE_FONT_AXIS_VALUE {
-                axisTag: DWRITE_FONT_AXIS_TAG_WIDTH,
-                value: v,
-            });
-        }
-
-        if let Some(v) = slant {
-            conditions.push(DWRITE_FONT_AXIS_VALUE {
-                axisTag: DWRITE_FONT_AXIS_TAG_SLANT,
-                value: v,
-            });
-        }
-
-        if let Some(v) = optical_size {
-            conditions.push(DWRITE_FONT_AXIS_VALUE {
-                axisTag: DWRITE_FONT_AXIS_TAG_OPTICAL_SIZE,
-                value: v,
-            });
-        }
-
-        if let Some(v) = italic {
-            conditions.push(DWRITE_FONT_AXIS_VALUE {
-                axisTag: DWRITE_FONT_AXIS_TAG_ITALIC,
-                value: if v { 1.0 } else { 0.0 },
-            });
-        }
-
-        let list = match family
-            .GetMatchingFonts2(&conditions)
-            .map_err(WindowsFontError::from)
-        {
+        let list = match self_.0.GetMatchingFonts(
+            DWRITE_FONT_WEIGHT(weight.unwrap_or(400.0) as i32),
+            DWRITE_FONT_STRETCH_NORMAL,
+            DWRITE_FONT_STYLE(style.unwrap_or(enums::Style::NORMAL) as i32),
+        ) {
             Ok(l) => l,
             Err(e) => {
                 let y = std::iter::once(e);
@@ -332,28 +281,15 @@ impl FontFamily {
     }
 
     /// Retrieves the best matching variant for the various conditions
-    #[pyo3(
-        text_signature = "($self, *, weight=None, width=None, slant=None, optical_size=None, italic=None)"
-    )]
+    #[pyo3(text_signature = "($self, *, weight=None, style=None)")]
     fn get_best_variant(
         rc: Py<Self>,
-        weight: Option<FloatOrEnum>,
-        width: Option<f32>,
-        slant: Option<f32>,
-        optical_size: Option<f32>,
-        italic: Option<bool>,
+        weight: Option<FloatOrWeight>,
+        style: Option<enums::Style>,
         py: Python<'_>,
     ) -> Result<FontVariant> {
         if let Some(item) = unsafe {
-            FontFamily::_get_matching_variants(
-                rc,
-                weight.map(Into::into),
-                width,
-                slant,
-                optical_size,
-                italic,
-                py,
-            )
+            FontFamily::_get_dwrite0_matching_variants(rc, weight.map(Into::into), style, py)
         }
         .next()
         {
@@ -363,29 +299,16 @@ impl FontFamily {
     }
 
     /// Retrieves a list of fonts in the font family, ranked in order of how well they match the specified axis values.
-    #[pyo3(
-        text_signature = "($self, *, weight=None, width=None, slant=None, optical_size=None, italic=None)"
-    )]
+    #[pyo3(text_signature = "($self, *, weight=None, style=None)")]
     fn get_matching_variants(
         rc: Py<Self>,
-        weight: Option<FloatOrEnum>,
-        width: Option<f32>,
-        slant: Option<f32>,
-        optical_size: Option<f32>,
-        italic: Option<bool>,
+        weight: Option<FloatOrWeight>,
+        style: Option<enums::Style>,
         py: Python<'_>,
     ) -> Result<&'_ PyList> {
         let mut variants;
         let iter = unsafe {
-            FontFamily::_get_matching_variants(
-                rc,
-                weight.map(Into::into),
-                width,
-                slant,
-                optical_size,
-                italic,
-                py,
-            )
+            FontFamily::_get_dwrite0_matching_variants(rc, weight.map(Into::into), style, py)
         };
 
         if let (_, Some(hint)) = iter.size_hint() {
