@@ -31,3 +31,8 @@ def test_get_best_match(weight, style, expected_props, family: FontFamily):
 
 def test_repr(family: FontFamily):
     assert repr(family) == '<FontFamily name="Arial">'
+
+
+def test_len(family: FontFamily):
+    # Lets just check it's an in int in a plausible range
+    assert 2 < len(family) < 25
