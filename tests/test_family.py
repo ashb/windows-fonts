@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from windows_fonts import FontCollection, FontFamily, Style, Weight
@@ -27,6 +29,51 @@ def test_get_best_match(weight, style, expected_props, family: FontFamily):
 
     for (name, val) in expected_props.items():
         assert getattr(var, name) == val
+
+
+@pytest.mark.parametrize(
+    ["width", "weight", "italic", "expected_props"],
+    [
+        pytest.param(
+            100,
+            None,
+            None,
+            {"weight": Weight.REGULAR, "style": Style.NORMAL, "file_stem": "ARIAL.TTF"},
+            id="100,None,None",
+        ),
+        pytest.param(
+            100,
+            None,
+            True,
+            {"weight": Weight.REGULAR, "style": Style.ITALIIC, "file_stem": "ARIALI.TTF"},
+            id="100,None,False",
+        ),
+        pytest.param(
+            100,
+            700,
+            True,
+            {"weight": Weight.BOLD, "style": Style.ITALIIC, "file_stem": "ARIALBI.TTF"},
+            id="100,700,True",
+        ),
+        pytest.param(
+            100,
+            Weight.BOLD,
+            True,
+            {"weight": Weight.BOLD, "style": Style.ITALIIC, "file_stem": "ARIALBI.TTF"},
+            id="100,BOLD,True",
+        ),
+    ],
+)
+def test_get_best_match_dwrite3(width, weight, italic, expected_props, family: FontFamily):
+    """Test the _get_dwrite3_matching_variants code path"""
+    var = family.get_best_variant(weight=weight, width=width, italic=italic)
+
+    for (name, expected) in expected_props.items():
+        if name == "file_stem":
+            val = os.path.basename(var.filename).upper()
+        else:
+            val = getattr(var, name)
+        assert val == expected
 
 
 def test_get_matching_variants(family: FontFamily):

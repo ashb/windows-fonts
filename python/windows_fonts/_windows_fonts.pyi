@@ -10,9 +10,25 @@ class FontFamily:
     def __len__(self) -> int: ...
     def __getitem__(self, idx: int) -> FontVariant: ...
     def get_matching_variants(
-        self, *, weight: float | Weight | None = None, style: Style | None = None
+        self,
+        *,
+        weight: float | Weight | None = None,
+        style: Style | None = None,
+        width: float | None = None,
+        slant: float | None = None,
+        optical_size: float | None = None,
+        italic: bool | None = None,
     ) -> list[FontVariant]: ...
-    def get_best_variant(self, *, weight: float | Weight | None = None, style: Style | None = None) -> FontVariant: ...
+    def get_best_variant(
+        self,
+        *,
+        weight: float | Weight | None = None,
+        style: Style | None = None,
+        width: float | None = None,
+        slant: float | None = None,
+        optical_size: float | None = None,
+        italic: bool | None = None,
+    ) -> FontVariant: ...
 
 class FontVariant:
     style: Style
