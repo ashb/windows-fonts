@@ -5,11 +5,16 @@ use std::slice;
 use anyhow::{bail, Result};
 
 use pyo3::class::basic::CompareOp;
-use pyo3::exceptions::{PyIndexError, PyKeyError, PyRuntimeError};
+use pyo3::exceptions::{PyIndexError, PyKeyError, PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyString};
 use windows::core::HSTRING;
 use windows::Win32::Foundation::BOOL;
+use windows::Win32::Graphics::DirectWrite::{
+    IDWriteFontFamily2, DWRITE_FONT_AXIS_TAG_ITALIC, DWRITE_FONT_AXIS_TAG_OPTICAL_SIZE,
+    DWRITE_FONT_AXIS_TAG_SLANT, DWRITE_FONT_AXIS_TAG_WEIGHT, DWRITE_FONT_AXIS_TAG_WIDTH,
+    DWRITE_FONT_AXIS_VALUE,
+};
 use windows::{
     core::{Interface, PCWSTR},
     w,
@@ -142,6 +147,7 @@ impl FontCollection {
         Ok(FontFamily(ifamily))
     }
 }
+
 trait BestLocaleName {
     unsafe fn get_best_name(&self) -> Result<String>;
 }
@@ -192,6 +198,8 @@ impl From<FloatOrWeight> for f32 {
     }
 }
 
+type ResultFontVariantIter = Box<dyn std::iter::Iterator<Item = Result<FontVariant>>>;
+
 #[pyclass(sequence, module = "windows_fonts", unsendable)]
 #[derive(Clone, Debug)]
 struct FontFamily(IDWriteFontFamily);
@@ -203,13 +211,46 @@ impl FontFamily {
         names.get_best_name()
     }
 
+    fn _get_matcing_variants(
+        rc: Py<Self>,
+        weight: Option<FloatOrWeight>,
+        style: Option<enums::Style>,
+        width: Option<f32>,
+        slant: Option<f32>,
+        optical_size: Option<f32>,
+        italic: Option<bool>,
+        py: Python<'_>,
+    ) -> anyhow::Result<ResultFontVariantIter> {
+        if style.is_some() {
+            // Windows 7 path
+            if width.is_some() || slant.is_some() || optical_size.is_some() || italic.is_some() {
+                bail!(PyValueError::new_err("cannot pass `style` and any of `width`, `slant`, `optical_size`, `italic` at the same time"));
+            }
+            unsafe {
+                FontFamily::_get_dwrite0_matching_variants(rc, weight.map(Into::into), style, py)
+            }
+        } else {
+            unsafe {
+                FontFamily::_get_dwrite3_matching_variants(
+                    rc,
+                    weight.map(Into::into),
+                    width,
+                    slant,
+                    optical_size,
+                    italic,
+                    py,
+                )
+            }
+        }
+    }
+
     // Windows 7 compatible!
     unsafe fn _get_dwrite0_matching_variants(
         rc: Py<Self>,
         weight: Option<f32>,
         style: Option<enums::Style>,
         py: Python<'_>,
-    ) -> Box<dyn Iterator<Item = anyhow::Result<FontVariant>> + '_> {
+    ) -> anyhow::Result<ResultFontVariantIter> {
         let copy = rc.clone();
         let self_ = copy.borrow(py);
         let list = match self_.0.GetMatchingFonts(
@@ -219,14 +260,12 @@ impl FontFamily {
         ) {
             Ok(l) => l,
             Err(e) => {
-                let y = std::iter::once(e);
-                return Box::new(y.map(move |e| Err(e.into())))
-                    as Box<dyn Iterator<Item = anyhow::Result<FontVariant>>>;
+                bail!(e)
             }
         };
 
         let num = list.GetFontCount();
-        let it = (0..num).map(move |n| -> Result<FontVariant> {
+        let iter = (0..num).map(move |n| -> Result<FontVariant> {
             let font = list.GetFont(n).map_err(WindowsFontError::from)?;
 
             Ok(FontVariant {
@@ -234,7 +273,84 @@ impl FontFamily {
                 family: rc.clone(),
             })
         });
-        Box::new(it)
+        Ok(Box::new(iter))
+    }
+
+    // Windows 10 Build 20348
+    unsafe fn _get_dwrite3_matching_variants(
+        rc: Py<Self>,
+        weight: Option<f32>,
+        width: Option<f32>,
+        slant: Option<f32>,
+        optical_size: Option<f32>,
+        italic: Option<bool>,
+        py: Python<'_>,
+    ) -> anyhow::Result<ResultFontVariantIter> {
+        // ) -> impl Iterator<Item = anyhow::Result<FontVariant>> {
+        // let self_ = rc.borrow(py);
+        let family = match rc.borrow(py).0.cast::<IDWriteFontFamily2>() {
+            Err(_e) => {
+                bail!(PyOSError::new_err(
+                    "Use of this function requires Windows 10 Build 20348 or above",
+                ));
+            }
+            Ok(f) => f,
+        };
+        let mut conditions: Vec<DWRITE_FONT_AXIS_VALUE> = Vec::new();
+
+        if let Some(v) = weight {
+            conditions.push(DWRITE_FONT_AXIS_VALUE {
+                axisTag: DWRITE_FONT_AXIS_TAG_WEIGHT,
+                value: v,
+            });
+        }
+
+        if let Some(v) = width {
+            conditions.push(DWRITE_FONT_AXIS_VALUE {
+                axisTag: DWRITE_FONT_AXIS_TAG_WIDTH,
+                value: v,
+            });
+        }
+
+        if let Some(v) = slant {
+            conditions.push(DWRITE_FONT_AXIS_VALUE {
+                axisTag: DWRITE_FONT_AXIS_TAG_SLANT,
+                value: v,
+            });
+        }
+
+        if let Some(v) = optical_size {
+            conditions.push(DWRITE_FONT_AXIS_VALUE {
+                axisTag: DWRITE_FONT_AXIS_TAG_OPTICAL_SIZE,
+                value: v,
+            });
+        }
+
+        if let Some(v) = italic {
+            conditions.push(DWRITE_FONT_AXIS_VALUE {
+                axisTag: DWRITE_FONT_AXIS_TAG_ITALIC,
+                value: if v { 1.0 } else { 0.0 },
+            });
+        }
+
+        let list = match family.GetMatchingFonts2(&conditions) {
+            Ok(l) => l,
+            Err(e) => {
+                bail!(e);
+            }
+        };
+
+        let num = list.GetFontCount();
+        let iter = (0..num).map(move |n| -> Result<FontVariant> {
+            let font = list.GetFont(n).map_err(WindowsFontError::from)?;
+
+            Ok(FontVariant {
+                font,
+                family: rc.clone(),
+            })
+        });
+
+        Ok(Box::new(iter))
     }
 }
 
@@ -281,41 +397,79 @@ impl FontFamily {
     }
 
     /// Retrieves the best matching variant for the various conditions
-    #[pyo3(text_signature = "($self, *, weight=None, style=None)")]
+    ///
+    /// Returns the first variant from :meth:`get_matching_variants` (but more efficiently, without creating
+    /// extra objects)
+    #[pyo3(
+        text_signature = "($self, *, weight=None, style=None, width=None, slant=None, optical_size=None, italic=None)"
+    )]
     fn get_best_variant(
         rc: Py<Self>,
         weight: Option<FloatOrWeight>,
         style: Option<enums::Style>,
+        width: Option<f32>,
+        slant: Option<f32>,
+        optical_size: Option<f32>,
+        italic: Option<bool>,
         py: Python<'_>,
     ) -> Result<FontVariant> {
-        if let Some(item) = unsafe {
-            FontFamily::_get_dwrite0_matching_variants(rc, weight.map(Into::into), style, py)
-        }
-        .next()
-        {
+        let mut iter = FontFamily::_get_matcing_variants(
+            rc,
+            weight,
+            style,
+            width,
+            slant,
+            optical_size,
+            italic,
+            py,
+        )?;
+
+        if let Some(item) = iter.next() {
             return item;
         }
         bail!("No variants found")
     }
 
     /// Retrieves a list of fonts in the font family, ranked in order of how well they match the specified axis values.
-    #[pyo3(text_signature = "($self, *, weight=None, style=None)")]
+    ///
+    /// On Windows 10 and below, only weight and style are allowed. It is not allowed to pass any of width,
+    /// sland, optical_size and italic at the same time as style.
+    ///
+    /// For weight, and style see https://learn.microsoft.com/en-us/windows/win32/api/dwrite/nf-dwrite-idwritefontfamily-getmatchingfonts
+    ///
+    /// For width, slant, optical_size and italic see
+    /// https://learn.microsoft.com/en-us/windows/win32/api/dwrite_3/nf-dwrite_3-idwritefontfamily2-getmatchingfonts
+    /// and https://learn.microsoft.com/en-us/windows/win32/api/dwrite_3/ns-dwrite_3-dwrite_font_axis_value
+    /// for possible values
+    #[pyo3(
+        text_signature = "($self, *, weight=None, style=None, width=None, slant=None, optical_size=None, italic=None)"
+    )]
     fn get_matching_variants(
         rc: Py<Self>,
         weight: Option<FloatOrWeight>,
         style: Option<enums::Style>,
+        width: Option<f32>,
+        slant: Option<f32>,
+        optical_size: Option<f32>,
+        italic: Option<bool>,
         py: Python<'_>,
     ) -> Result<&'_ PyList> {
-        let mut variants;
-        let iter = unsafe {
-            FontFamily::_get_dwrite0_matching_variants(rc, weight.map(Into::into), style, py)
-        };
+        let iter = FontFamily::_get_matcing_variants(
+            rc,
+            weight,
+            style,
+            width,
+            slant,
+            optical_size,
+            italic,
+            py,
+        )?;
 
-        if let (_, Some(hint)) = iter.size_hint() {
-            variants = Vec::with_capacity(hint);
+        let mut variants = if let (_, Some(hint)) = iter.size_hint() {
+            Vec::with_capacity(hint)
         } else {
-            variants = Vec::new();
-        }
+            Vec::new()
+        };
 
         for item in iter {
             variants.push(item?.into_py(py))
