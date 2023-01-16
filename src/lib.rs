@@ -1,29 +1,22 @@
 use std::cell::RefCell;
 use std::ffi::{c_int, c_void};
-use std::slice;
+use std::rc::Rc;
+use std::slice::{self};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
+use ::phf::{phf_map, Map};
 use pyo3::class::basic::CompareOp;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyString};
+use pyo3::types::{PyList, PyLong, PyString, PyTuple};
 use windows::core::HSTRING;
 use windows::Win32::Foundation::BOOL;
-use windows::Win32::Graphics::DirectWrite::{
-    IDWriteFontFamily2, DWRITE_FONT_AXIS_TAG_ITALIC, DWRITE_FONT_AXIS_TAG_OPTICAL_SIZE,
-    DWRITE_FONT_AXIS_TAG_SLANT, DWRITE_FONT_AXIS_TAG_WEIGHT, DWRITE_FONT_AXIS_TAG_WIDTH,
-    DWRITE_FONT_AXIS_VALUE,
-};
+
+use windows::Win32::Graphics::DirectWrite::*;
 use windows::{
     core::{Interface, PCWSTR},
     w,
-    Win32::Graphics::DirectWrite::{
-        DWriteCreateFactory, IDWriteFactory1, IDWriteFont, IDWriteFontCollection1,
-        IDWriteFontFamily, IDWriteFontFile, IDWriteLocalFontFileLoader, IDWriteLocalizedStrings,
-        DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE,
-        DWRITE_FONT_WEIGHT,
-    },
 };
 
 thread_local! {
@@ -75,7 +68,7 @@ mod errors;
 
 use errors::WindowsFontError;
 
-#[derive(FromPyObject)]
+#[derive(FromPyObject, Debug)]
 enum IntOrStr<'a> {
     Str(&'a PyString),
     Int(isize),
@@ -269,7 +262,7 @@ impl FontFamily {
             let font = list.GetFont(n).map_err(WindowsFontError::from)?;
 
             Ok(FontVariant {
-                font,
+                font: Rc::new(font),
                 family: rc.clone(),
             })
         });
@@ -345,7 +338,7 @@ impl FontFamily {
             let font = list.GetFont(n).map_err(WindowsFontError::from)?;
 
             Ok(FontVariant {
-                font,
+                font: Rc::new(font),
                 family: rc.clone(),
             })
         });
@@ -377,7 +370,7 @@ impl FontFamily {
             }
             match self_.0.GetFont(index as u32) {
                 Ok(font) => Ok(FontVariant {
-                    font,
+                    font: Rc::new(font),
                     family: rc.clone(),
                 }),
                 Err(_) => Err(PyIndexError::new_err(format!(
@@ -501,7 +494,7 @@ impl PartialEq for FontFamily {
 
 #[pyclass(module = "windows_fonts", unsendable)]
 struct FontVariant {
-    font: IDWriteFont,
+    font: Rc<IDWriteFont>,
     // Keep the family alive so we can use it in `repr`, but don't create a _rust_ memory cycle
     #[pyo3(get)]
     family: Py<FontFamily>,
@@ -519,11 +512,20 @@ impl FontVariant {
         unsafe { ::std::mem::transmute(self.font.GetWeight().0) }
     }
 
+    #[getter]
+    pub fn name(&self) -> Result<String> {
+        unsafe {
+            let names = self.font.GetFaceNames()?;
+            names.get_best_name()
+        }
+    }
+
     pub fn __repr__(&self, py: Python) -> PyResult<String> {
         let family = self.family.as_ref(py);
 
         Ok(format!(
-            "<FontVariant family={}, style={} weight={}>",
+            "<FontVariant name={}, family={}, style={} weight={}>",
+            self.name()?,
             family.repr()?,
             self.style().into_py(py).as_ref(py).repr()?,
             self.weight().into_py(py).as_ref(py).repr()?,
@@ -545,6 +547,13 @@ impl FontVariant {
     pub fn files(&self) -> PyResult<Vec<String>> {
         let res = unsafe { self._get_files() }?;
         Ok(res)
+    }
+
+    #[getter]
+    pub fn information(&self) -> InformationDict {
+        InformationDict {
+            font: self.font.clone(),
+        }
     }
 
     fn __richcmp__(&self, other: &Self, op: CompareOp, py: Python<'_>) -> PyObject {
@@ -616,6 +625,206 @@ impl FontVariant {
     }
 }
 
+trait PyInformationStrings {
+    fn get_info_string(&self, id: i32) -> Result<Option<IDWriteLocalizedStrings>>;
+}
+
+impl PyInformationStrings for Rc<IDWriteFont> {
+    fn get_info_string(&self, id: i32) -> Result<Option<IDWriteLocalizedStrings>> {
+        let mut exists = BOOL(0);
+        let mut strings = Default::default();
+
+        if let Err(e) = unsafe {
+            self.GetInformationalStrings(
+                DWRITE_INFORMATIONAL_STRING_ID(id),
+                Some(&mut strings),
+                &mut exists,
+            )
+        } {
+            return Err(e).context("GetInformationalStrings failed");
+        }
+        if exists.as_bool() {
+            return Ok(strings);
+        }
+        Ok(None)
+    }
+}
+
+#[pyclass(module = "windows_fonts", unsendable)]
+struct InformationIter {
+    iter: Box<dyn Iterator<Item = &'static str>>,
+}
+
+impl InformationIter {
+    pub fn new(font: Rc<IDWriteFont>) -> Self {
+        // Ideally I'd reuse the _valid_information_keys() function, but I couldn't get the borrow checker to be happy with it :(
+        // let clone = font.clone();
+        let rc: Box<dyn Iterator<Item = &'static str>> =
+            Box::new(INFO_STRING_NAMES.entries().filter_map(move |(key, id)| {
+                match font.get_info_string(*id) {
+                    Ok(Some(_)) => Some(*key),
+                    Ok(None) => None,
+                    Err(_) => None,
+                }
+            }));
+        Self { iter: rc }
+    }
+}
+
+#[pymethods]
+impl InformationIter {
+    fn __next__(&mut self) -> Option<&'static str> {
+        self.iter.next()
+    }
+
+    pub fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+}
+
+static INFO_STRING_NAMES: Map<&'static str, i32> = phf_map! {
+    "copyright" => DWRITE_INFORMATIONAL_STRING_COPYRIGHT_NOTICE.0,
+    "versions" => DWRITE_INFORMATIONAL_STRING_VERSION_STRINGS.0,
+    "trademark" => DWRITE_INFORMATIONAL_STRING_TRADEMARK.0,
+    "manufacturer" => DWRITE_INFORMATIONAL_STRING_MANUFACTURER.0,
+    "designer" => DWRITE_INFORMATIONAL_STRING_DESIGNER.0,
+    "designer_url" => DWRITE_INFORMATIONAL_STRING_DESIGNER_URL.0,
+    "description" => DWRITE_INFORMATIONAL_STRING_DESCRIPTION.0,
+    "vendor_url" => DWRITE_INFORMATIONAL_STRING_FONT_VENDOR_URL.0,
+    "license_description" => DWRITE_INFORMATIONAL_STRING_LICENSE_DESCRIPTION.0,
+    "license_info_url" => DWRITE_INFORMATIONAL_STRING_LICENSE_INFO_URL.0,
+    "win32_family_names" => DWRITE_INFORMATIONAL_STRING_WIN32_FAMILY_NAMES.0,
+    "win32_subfamily_names" => DWRITE_INFORMATIONAL_STRING_WIN32_SUBFAMILY_NAMES.0,
+    "typographigc_family_names" => {
+        DWRITE_INFORMATIONAL_STRING_TYPOGRAPHIC_FAMILY_NAMES.0
+    },
+    "typographic_subfamily_names" => {
+        DWRITE_INFORMATIONAL_STRING_TYPOGRAPHIC_SUBFAMILY_NAMES.0
+    },
+    "sample_text" => DWRITE_INFORMATIONAL_STRING_SAMPLE_TEXT.0,
+    "full_name" => DWRITE_INFORMATIONAL_STRING_FULL_NAME.0,
+    "postscript_name" => DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_NAME.0,
+    "postscript_cid_name" => DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_CID_NAME.0,
+    "weight_stretch_style_family_name" => {
+        DWRITE_INFORMATIONAL_STRING_WEIGHT_STRETCH_STYLE_FAMILY_NAME.0
+    },
+    "design_script_language_tag" => {
+        DWRITE_INFORMATIONAL_STRING_DESIGN_SCRIPT_LANGUAGE_TAG.0
+    },
+    "supported_script_language_tag" => {
+        DWRITE_INFORMATIONAL_STRING_SUPPORTED_SCRIPT_LANGUAGE_TAG.0
+    },
+    "preferred_family_names" => DWRITE_INFORMATIONAL_STRING_PREFERRED_FAMILY_NAMES.0,
+    "preferred_subfamily_names" => {
+        DWRITE_INFORMATIONAL_STRING_PREFERRED_SUBFAMILY_NAMES.0
+    },
+    "wss_family_name" => DWRITE_INFORMATIONAL_STRING_WWS_FAMILY_NAME.0,
+};
+
+/// A dict-like class showing the information fields in a font file
+///
+/// Access can either be a string, or one of the integer constants defined in `DWRITE_INFORMATIONAL_STRING_ID`__
+///
+/// .. __: https://learn.microsoft.com/en-us/windows/win32/api/dwrite/ne-dwrite-dwrite_informational_string_id
+#[pyclass(module = "windows_fonts", unsendable)]
+struct InformationDict {
+    font: Rc<IDWriteFont>,
+}
+
+impl InformationDict {
+    fn _items(&self) -> Box<dyn Iterator<Item = (&str, String)>> {
+        let clone = self.font.clone();
+
+        Box::new(INFO_STRING_NAMES.entries().filter_map(move |(key, id)| {
+            match clone.get_info_string(*id) {
+                Ok(Some(local_strings)) => {
+                    Some((*key, unsafe { local_strings.get_best_name().unwrap() }))
+                }
+                Ok(None) => None,
+                Err(_) => None,
+            }
+        }))
+    }
+
+    fn _valid_information_keys(&self) -> Box<dyn Iterator<Item = (&str, i32)>> {
+        let clone = self.font.clone();
+
+        Box::new(INFO_STRING_NAMES.entries().filter_map(move |(key, id)| {
+            match clone.get_info_string(*id) {
+                Ok(Some(_)) => Some((*key, *id)),
+                Ok(None) => None,
+                Err(_) => None,
+            }
+        }))
+    }
+}
+
+#[pymethods]
+impl InformationDict {
+    pub fn __len__(&self) -> Result<usize> {
+        Ok(self._valid_information_keys().count())
+    }
+
+    pub fn __contains__(&self, key: &PyAny) -> Result<bool> {
+        if let Ok(pystr) = key.downcast::<PyString>() {
+            let wanted = pystr.to_str()?;
+            Ok(self._valid_information_keys().any(|(key, _)| key == wanted))
+        } else if let Ok(pylong) = key.downcast::<PyLong>() {
+            let wanted = pylong.extract()?;
+            Ok(self._valid_information_keys().any(|(_, id)| id == wanted))
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn keys<'p>(&self, py: Python<'p>) -> Result<&'p PyList> {
+        let list = PyList::empty(py);
+        for (key, _id) in self._valid_information_keys() {
+            list.append(PyString::new(py, key))?;
+        }
+        list.sort()?;
+        Ok(list)
+    }
+
+    pub fn values<'p>(&self, py: Python<'p>) -> Result<&'p PyList> {
+        let list = PyList::empty(py);
+        for (_key, val) in self._items() {
+            list.append(val.into_py(py))?;
+        }
+        list.sort()?;
+        Ok(list)
+    }
+
+    pub fn items<'p>(&self, py: Python<'p>) -> Result<&'p PyList> {
+        let list = PyList::empty(py);
+        for (key, val) in self._items() {
+            list.append(PyTuple::new(py, vec![key.into_py(py), val.into_py(py)]))?;
+        }
+        list.sort()?;
+        Ok(list)
+    }
+
+    pub fn __iter__(slf: PyRef<'_, Self>) -> InformationIter {
+        InformationIter::new(slf.font.clone())
+    }
+
+    pub fn __getitem__(&self, key: IntOrStr) -> PyResult<String> {
+        let index = match key {
+            IntOrStr::Str(str) => match INFO_STRING_NAMES.get(str.to_str()?) {
+                Some(i) => i.to_owned(),
+                _ => return Err(PyKeyError::new_err(format!("{str:?} doesn't exist"))),
+            },
+            IntOrStr::Int(i) => i as i32,
+        };
+
+        match self.font.get_info_string(index) {
+            Ok(Some(s)) => unsafe { s.get_best_name() }.map_err(|e| e.into()),
+            Ok(None) => return Err(PyKeyError::new_err(format!("{key:?} doesn't exist"))),
+            Err(err) => Err(err.into()),
+        }
+    }
+}
+
 /// A Python module implemented in Rust.
 #[pymodule]
 fn _windows_fonts(_py: Python, m: &PyModule) -> PyResult<()> {
@@ -623,6 +832,7 @@ fn _windows_fonts(_py: Python, m: &PyModule) -> PyResult<()> {
     // Even though these aren't constructable from python code, for ease of use in type checking we export them anyway
     m.add_class::<FontFamily>()?;
     m.add_class::<FontVariant>()?;
+    m.add_class::<InformationDict>()?;
     m.add_class::<enums::Weight>()?;
     m.add_class::<enums::Style>()?;
     Ok(())

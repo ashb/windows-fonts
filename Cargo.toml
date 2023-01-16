@@ -16,6 +16,7 @@ python-source = "python"
 pyo3 = { version = "0.17.2", features = ["extension-module", "anyhow"] }
 anyhow = "1.0"
 thiserror = "1.0"
+phf = { version = "0.11.1", features = ["macros"] }
 
 [dependencies.windows]
 version = "0.42.0"
