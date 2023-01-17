@@ -2,7 +2,7 @@ import collections.abc
 
 import pytest
 
-from windows_fonts import FontCollection, FontVariant, Style, Weight
+from windows_fonts import FontCollection, FontVariant, Style, Weight, get_matching_variants
 
 
 @pytest.fixture(scope="module")
@@ -18,6 +18,32 @@ def family(collection):
 @pytest.fixture
 def variant(family):
     return family[0]
+
+
+def test_get_matching_variants(collection: FontCollection):
+    vars = get_matching_variants(full_name="Arial Bold Italic")
+
+    assert len(vars) == 1
+
+    var = vars[0]
+    assert var.style == Style.ITALIIC
+    assert var.weight == Weight.BOLD
+    assert var.name == "Bold Italic"
+    assert var.family == collection["Arial"]
+
+
+@pytest.mark.parametrize(
+    ["kwargs", "match"],
+    [
+        [{"not_a_prop": "string"}, r"isn't a known font property name"],
+        [{"copyright": "string"}, r"doesn't have a mapping to font property id"],
+        [{"win32_family_names": 1.0}, r"'float' object cannot be converted to"],
+        [{}, r"no filter conditions passed"],
+    ],
+)
+def test_get_matching_variants_errors(kwargs, match: str, collection: FontCollection):
+    with pytest.raises(TypeError, match=match):
+        get_matching_variants(**kwargs)
 
 
 def test_name(variant):

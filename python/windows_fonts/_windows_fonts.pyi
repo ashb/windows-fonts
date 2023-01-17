@@ -52,3 +52,15 @@ class Weight(enum.Enum):
     EXTRA_BOLD = ...
     BLACK = ...
     EXTRA_BLACK = ...
+
+def get_matching_variants(
+    win32_family_names: str | None = None,
+    typographic_family_names: str | None = None,
+    full_name: str | None = None,
+    postscript_name: str | None = None,
+    weight_stretch_style_family_name: str | None = None,
+    design_script_language_tag: str | None = None,
+    supported_script_language_tag: str | None = None,
+    preferred_family_names: str | None = None,
+    preferred_subfamily_names: str | None = None,
+) -> list[FontVariant]: ...
