@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::rc::Rc;
 use std::slice::{self};
@@ -7,7 +8,9 @@ use anyhow::{bail, Context, Result};
 
 use ::phf::{phf_map, Map};
 use pyo3::class::basic::CompareOp;
-use pyo3::exceptions::{PyIndexError, PyKeyError, PyOSError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{
+    PyIndexError, PyKeyError, PyOSError, PyRuntimeError, PyTypeError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyLong, PyString, PyTuple};
 use windows::core::HSTRING;
@@ -93,6 +96,73 @@ impl FontCollection {
             )
         }
     }
+}
+
+#[pyfunction(kwargs = "**")]
+fn get_matching_variants(kwargs: Option<HashMap<&str, &str>>) -> PyResult<Vec<FontVariant>> {
+    let kwargs = match kwargs {
+        Some(val) => val,
+        None => return Err(PyTypeError::new_err("no filter conditions passed")),
+    };
+    let mut filters = Vec::<DWRITE_FONT_PROPERTY>::with_capacity(kwargs.len());
+    for (name, val) in kwargs {
+        match INFO_STRING_NAMES.get(name) {
+            Some((_, DWRITE_FONT_PROPERTY_ID_NONE)) => {
+                return Err(PyTypeError::new_err(format!(
+                    "{name:?} doesn't have a mapping to font property id"
+                )))
+            }
+            Some((_, id)) => {
+                filters.push(DWRITE_FONT_PROPERTY {
+                    propertyId: *id,
+                    propertyValue: PCWSTR(HSTRING::from(val).as_ptr()),
+                    ..Default::default()
+                });
+            }
+            _ => {
+                return Err(PyTypeError::new_err(format!(
+                    "{name:?} isn't a known font property name"
+                )))
+            }
+        };
+    }
+
+    // This is a  closure so we can apply map_err to the whole block of Win API calls
+    let win_api_block = || unsafe {
+        let factory: IDWriteFactory3 = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+
+        let fontset = factory.GetSystemFontSet()?;
+
+        let set = fontset.GetMatchingFonts2(&filters)?;
+
+        let count = set.GetFontCount();
+
+        let mut collection: Option<IDWriteFontCollection1> = None;
+        factory.GetSystemFontCollection(&mut collection as *mut _ as _, false)?;
+        // Panic here is okay, cos we _shouldn't_ have an error but no collection given back
+        let collection =
+            collection.expect("GetSystemFontCollection had not error but gave us no collection");
+
+        let mut res = Vec::<FontVariant>::with_capacity(count as usize);
+        for n in 0..count {
+            let font_ref = set.GetFontFaceReference(n)?;
+            let face: IDWriteFontFace = font_ref.CreateFontFace()?.cast()?;
+            let font = collection.GetFontFromFontFace(&face)?;
+            let ifamily = font.GetFontFamily()?;
+
+            let family = FontFamily(ifamily);
+
+            let x =
+                Python::with_gil(|py| -> PyResult<Py<FontFamily>> { Py::new(py, family) }).unwrap();
+
+            res.push(FontVariant {
+                family: x,
+                font: Rc::new(font),
+            });
+        }
+        Ok::<Vec<FontVariant>, windows::core::Error>(res)
+    };
+    Ok(win_api_block().map_err(WindowsFontError::from)?)
 }
 
 #[pymethods]
@@ -626,21 +696,22 @@ impl FontVariant {
 }
 
 trait PyInformationStrings {
-    fn get_info_string(&self, id: i32) -> Result<Option<IDWriteLocalizedStrings>>;
+    fn get_info_string(
+        &self,
+        id: DWRITE_INFORMATIONAL_STRING_ID,
+    ) -> Result<Option<IDWriteLocalizedStrings>>;
 }
 
 impl PyInformationStrings for Rc<IDWriteFont> {
-    fn get_info_string(&self, id: i32) -> Result<Option<IDWriteLocalizedStrings>> {
+    fn get_info_string(
+        &self,
+        id: DWRITE_INFORMATIONAL_STRING_ID,
+    ) -> Result<Option<IDWriteLocalizedStrings>> {
         let mut exists = BOOL(0);
         let mut strings = Default::default();
 
-        if let Err(e) = unsafe {
-            self.GetInformationalStrings(
-                DWRITE_INFORMATIONAL_STRING_ID(id),
-                Some(&mut strings),
-                &mut exists,
-            )
-        } {
+        if let Err(e) = unsafe { self.GetInformationalStrings(id, Some(&mut strings), &mut exists) }
+        {
             return Err(e).context("GetInformationalStrings failed");
         }
         if exists.as_bool() {
@@ -659,14 +730,15 @@ impl InformationIter {
     pub fn new(font: Rc<IDWriteFont>) -> Self {
         // Ideally I'd reuse the _valid_information_keys() function, but I couldn't get the borrow checker to be happy with it :(
         // let clone = font.clone();
-        let rc: Box<dyn Iterator<Item = &'static str>> =
-            Box::new(INFO_STRING_NAMES.entries().filter_map(move |(key, id)| {
-                match font.get_info_string(*id) {
+        let rc: Box<dyn Iterator<Item = &'static str>> = Box::new(
+            INFO_STRING_NAMES
+                .entries()
+                .filter_map(move |(key, (id, _))| match font.get_info_string(*id) {
                     Ok(Some(_)) => Some(*key),
                     Ok(None) => None,
                     Err(_) => None,
-                }
-            }));
+                }),
+        );
         Self { iter: rc }
     }
 }
@@ -682,43 +754,57 @@ impl InformationIter {
     }
 }
 
-static INFO_STRING_NAMES: Map<&'static str, i32> = phf_map! {
-    "copyright" => DWRITE_INFORMATIONAL_STRING_COPYRIGHT_NOTICE.0,
-    "versions" => DWRITE_INFORMATIONAL_STRING_VERSION_STRINGS.0,
-    "trademark" => DWRITE_INFORMATIONAL_STRING_TRADEMARK.0,
-    "manufacturer" => DWRITE_INFORMATIONAL_STRING_MANUFACTURER.0,
-    "designer" => DWRITE_INFORMATIONAL_STRING_DESIGNER.0,
-    "designer_url" => DWRITE_INFORMATIONAL_STRING_DESIGNER_URL.0,
-    "description" => DWRITE_INFORMATIONAL_STRING_DESCRIPTION.0,
-    "vendor_url" => DWRITE_INFORMATIONAL_STRING_FONT_VENDOR_URL.0,
-    "license_description" => DWRITE_INFORMATIONAL_STRING_LICENSE_DESCRIPTION.0,
-    "license_info_url" => DWRITE_INFORMATIONAL_STRING_LICENSE_INFO_URL.0,
-    "win32_family_names" => DWRITE_INFORMATIONAL_STRING_WIN32_FAMILY_NAMES.0,
-    "win32_subfamily_names" => DWRITE_INFORMATIONAL_STRING_WIN32_SUBFAMILY_NAMES.0,
-    "typographigc_family_names" => {
-        DWRITE_INFORMATIONAL_STRING_TYPOGRAPHIC_FAMILY_NAMES.0
+static INFO_STRING_NAMES: Map<
+    &'static str,
+    (DWRITE_INFORMATIONAL_STRING_ID, DWRITE_FONT_PROPERTY_ID),
+> = phf_map! {
+    "copyright" => (DWRITE_INFORMATIONAL_STRING_COPYRIGHT_NOTICE, DWRITE_FONT_PROPERTY_ID_NONE),
+    "versions" => (DWRITE_INFORMATIONAL_STRING_VERSION_STRINGS, DWRITE_FONT_PROPERTY_ID_NONE),
+    "trademark" => (DWRITE_INFORMATIONAL_STRING_TRADEMARK, DWRITE_FONT_PROPERTY_ID_NONE),
+    "manufacturer" => (DWRITE_INFORMATIONAL_STRING_MANUFACTURER, DWRITE_FONT_PROPERTY_ID_NONE),
+    "designer" => (DWRITE_INFORMATIONAL_STRING_DESIGNER, DWRITE_FONT_PROPERTY_ID_NONE),
+    "designer_url" => (DWRITE_INFORMATIONAL_STRING_DESIGNER_URL, DWRITE_FONT_PROPERTY_ID_NONE),
+    "description" => (DWRITE_INFORMATIONAL_STRING_DESCRIPTION, DWRITE_FONT_PROPERTY_ID_NONE),
+    "vendor_url" => (DWRITE_INFORMATIONAL_STRING_FONT_VENDOR_URL, DWRITE_FONT_PROPERTY_ID_NONE),
+    "license_description" => (DWRITE_INFORMATIONAL_STRING_LICENSE_DESCRIPTION, DWRITE_FONT_PROPERTY_ID_NONE),
+    "license_info_url" => (DWRITE_INFORMATIONAL_STRING_LICENSE_INFO_URL, DWRITE_FONT_PROPERTY_ID_NONE),
+    "win32_family_names" => (DWRITE_INFORMATIONAL_STRING_WIN32_FAMILY_NAMES, DWRITE_FONT_PROPERTY_ID_WIN32_FAMILY_NAME),
+    "win32_subfamily_names" => (DWRITE_INFORMATIONAL_STRING_WIN32_SUBFAMILY_NAMES, DWRITE_FONT_PROPERTY_ID_NONE),
+    "typographic_family_names" => {
+        (DWRITE_INFORMATIONAL_STRING_TYPOGRAPHIC_FAMILY_NAMES, DWRITE_FONT_PROPERTY_ID_TYPOGRAPHIC_FAMILY_NAME)
     },
     "typographic_subfamily_names" => {
-        DWRITE_INFORMATIONAL_STRING_TYPOGRAPHIC_SUBFAMILY_NAMES.0
+        (DWRITE_INFORMATIONAL_STRING_TYPOGRAPHIC_SUBFAMILY_NAMES, DWRITE_FONT_PROPERTY_ID_NONE)
     },
-    "sample_text" => DWRITE_INFORMATIONAL_STRING_SAMPLE_TEXT.0,
-    "full_name" => DWRITE_INFORMATIONAL_STRING_FULL_NAME.0,
-    "postscript_name" => DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_NAME.0,
-    "postscript_cid_name" => DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_CID_NAME.0,
+    "sample_text" => (DWRITE_INFORMATIONAL_STRING_SAMPLE_TEXT, DWRITE_FONT_PROPERTY_ID_NONE),
+    "full_name" => (DWRITE_INFORMATIONAL_STRING_FULL_NAME, DWRITE_FONT_PROPERTY_ID_FULL_NAME),
+    "postscript_name" => (DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_NAME, DWRITE_FONT_PROPERTY_ID_POSTSCRIPT_NAME),
+    "postscript_cid_name" => (DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_CID_NAME, DWRITE_FONT_PROPERTY_ID_NONE),
     "weight_stretch_style_family_name" => {
-        DWRITE_INFORMATIONAL_STRING_WEIGHT_STRETCH_STYLE_FAMILY_NAME.0
+        (DWRITE_INFORMATIONAL_STRING_WEIGHT_STRETCH_STYLE_FAMILY_NAME, DWRITE_FONT_PROPERTY_ID_WEIGHT_STRETCH_STYLE_FAMILY_NAME)
     },
     "design_script_language_tag" => {
-        DWRITE_INFORMATIONAL_STRING_DESIGN_SCRIPT_LANGUAGE_TAG.0
+        (DWRITE_INFORMATIONAL_STRING_DESIGN_SCRIPT_LANGUAGE_TAG, DWRITE_FONT_PROPERTY_ID_DESIGN_SCRIPT_LANGUAGE_TAG)
     },
     "supported_script_language_tag" => {
-        DWRITE_INFORMATIONAL_STRING_SUPPORTED_SCRIPT_LANGUAGE_TAG.0
+        (DWRITE_INFORMATIONAL_STRING_SUPPORTED_SCRIPT_LANGUAGE_TAG, DWRITE_FONT_PROPERTY_ID_SUPPORTED_SCRIPT_LANGUAGE_TAG)
     },
-    "preferred_family_names" => DWRITE_INFORMATIONAL_STRING_PREFERRED_FAMILY_NAMES.0,
+    "preferred_family_names" => (DWRITE_INFORMATIONAL_STRING_PREFERRED_FAMILY_NAMES, DWRITE_FONT_PROPERTY_ID_PREFERRED_FAMILY_NAME),
     "preferred_subfamily_names" => {
-        DWRITE_INFORMATIONAL_STRING_PREFERRED_SUBFAMILY_NAMES.0
+        (DWRITE_INFORMATIONAL_STRING_PREFERRED_SUBFAMILY_NAMES, DWRITE_FONT_PROPERTY_ID_FAMILY_NAME)
     },
-    "wss_family_name" => DWRITE_INFORMATIONAL_STRING_WWS_FAMILY_NAME.0,
+    "wss_family_name" => (DWRITE_INFORMATIONAL_STRING_WWS_FAMILY_NAME, DWRITE_FONT_PROPERTY_ID_NONE),
+    // DWRITE_FONT_PROPERTY_ID_WEIGHT_STRETCH_STYLE_FAMILY_NAME
+    // DWRITE_FONT_PROPERTY_ID_WEIGHT_STRETCH_STYLE_FACE_NAME
+    // DWRITE_FONT_PROPERTY_ID_SEMANTIC_TAG
+    // DWRITE_FONT_PROPERTY_ID_WEIGHT
+    // DWRITE_FONT_PROPERTY_ID_STRETCH
+    // DWRITE_FONT_PROPERTY_ID_STYLE
+    // DWRITE_FONT_PROPERTY_ID_TYPOGRAPHIC_FACE_NAME
+    // skip DWRITE_FONT_PROPERTY_ID_TOTAL
+    // skip DWRITE_FONT_PROPERTY_ID_TOTAL_RS3
+    // DWRITE_FONT_PROPERTY_ID_FAMILY_NAME
+    // DWRITE_FONT_PROPERTY_ID_FACE_NAME -- Regular or Bold
 };
 
 /// A dict-like class showing the information fields in a font file
@@ -735,27 +821,33 @@ impl InformationDict {
     fn _items(&self) -> Box<dyn Iterator<Item = (&str, String)>> {
         let clone = self.font.clone();
 
-        Box::new(INFO_STRING_NAMES.entries().filter_map(move |(key, id)| {
-            match clone.get_info_string(*id) {
-                Ok(Some(local_strings)) => {
-                    Some((*key, unsafe { local_strings.get_best_name().unwrap() }))
-                }
-                Ok(None) => None,
-                Err(_) => None,
-            }
-        }))
+        Box::new(
+            INFO_STRING_NAMES
+                .entries()
+                .filter_map(move |(key, (id, _))| match clone.get_info_string(*id) {
+                    Ok(Some(local_strings)) => {
+                        Some((*key, unsafe { local_strings.get_best_name().unwrap() }))
+                    }
+                    Ok(None) => None,
+                    Err(_) => None,
+                }),
+        )
     }
 
-    fn _valid_information_keys(&self) -> Box<dyn Iterator<Item = (&str, i32)>> {
+    fn _valid_information_keys(
+        &self,
+    ) -> Box<dyn Iterator<Item = (&str, DWRITE_INFORMATIONAL_STRING_ID)>> {
         let clone = self.font.clone();
 
-        Box::new(INFO_STRING_NAMES.entries().filter_map(move |(key, id)| {
-            match clone.get_info_string(*id) {
-                Ok(Some(_)) => Some((*key, *id)),
-                Ok(None) => None,
-                Err(_) => None,
-            }
-        }))
+        Box::new(
+            INFO_STRING_NAMES
+                .entries()
+                .filter_map(move |(key, (id, _))| match clone.get_info_string(*id) {
+                    Ok(Some(_)) => Some((*key, *id)),
+                    Ok(None) => None,
+                    Err(_) => None,
+                }),
+        )
     }
 }
 
@@ -771,7 +863,7 @@ impl InformationDict {
             Ok(self._valid_information_keys().any(|(key, _)| key == wanted))
         } else if let Ok(pylong) = key.downcast::<PyLong>() {
             let wanted = pylong.extract()?;
-            Ok(self._valid_information_keys().any(|(_, id)| id == wanted))
+            Ok(self._valid_information_keys().any(|(_, id)| id.0 == wanted))
         } else {
             Ok(false)
         }
@@ -811,10 +903,10 @@ impl InformationDict {
     pub fn __getitem__(&self, key: IntOrStr) -> PyResult<String> {
         let index = match key {
             IntOrStr::Str(str) => match INFO_STRING_NAMES.get(str.to_str()?) {
-                Some(i) => i.to_owned(),
+                Some((id, _)) => *id,
                 _ => return Err(PyKeyError::new_err(format!("{str:?} doesn't exist"))),
             },
-            IntOrStr::Int(i) => i as i32,
+            IntOrStr::Int(i) => DWRITE_INFORMATIONAL_STRING_ID(i as i32),
         };
 
         match self.font.get_info_string(index) {
@@ -835,6 +927,8 @@ fn _windows_fonts(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<InformationDict>()?;
     m.add_class::<enums::Weight>()?;
     m.add_class::<enums::Style>()?;
+
+    m.add_function(wrap_pyfunction!(get_matching_variants, m)?)?;
     Ok(())
 }
 
